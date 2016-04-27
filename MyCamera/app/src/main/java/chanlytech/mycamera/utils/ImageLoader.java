@@ -1,11 +1,5 @@
 package chanlytech.mycamera.utils;
 
-import java.lang.reflect.Field;
-import java.util.LinkedList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
-
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Handler;
@@ -13,424 +7,332 @@ import android.os.Looper;
 import android.os.Message;
 import android.support.v4.util.LruCache;
 import android.util.DisplayMetrics;
-import android.util.Log;
-import android.view.ViewGroup.LayoutParams;
+import android.view.ViewGroup;
 import android.widget.ImageView;
 
-public class ImageLoader
-{
-	/**
-	 * 图片缓存的核心类
-	 */
-	private LruCache<String, Bitmap> mLruCache;
-	/**
-	 * 线程池
-	 */
-	private ExecutorService mThreadPool;
-	/**
-	 * 线程池的线程数量，默认为1
-	 */
-	private int mThreadCount = 1;
-	/**
-	 * 队列的调度方式
-	 */
-	private Type mType = Type.LIFO;
-	/**
-	 * 任务队列
-	 */
-	private LinkedList<Runnable> mTasks;
-	/**
-	 * 轮询的线程
-	 */
-	private Thread mPoolThread;
-	private Handler mPoolThreadHander;
+import java.lang.reflect.Field;
+import java.util.LinkedList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
-	/**
-	 * 运行在UI线程的handler，用于给ImageView设置图片
-	 */
-	private Handler mHandler;
+/**
+ * 图片加载类
+ */
+public class ImageLoader {
+    private static ImageLoader mInstance;
+    /**
+     * 图片缓存核心对象
+     */
+    private LruCache<String, Bitmap> mLruCache;
+    /**
+     * 线程池
+     */
+    private ExecutorService mThreadPool;
+    /**
+     * 线程池的线程数量，默认为1
+     */
+    private static final int DEAFULT_THREAD_COUNT = 1;
+    /**
+     * 队列的调度方式
+     */
+    private Type mType = Type.LIFO;
+    /**
+     * 任务队列
+     */
+    private LinkedList<Runnable> mTasksQueue;
+    /**
+     * 轮询的线程
+     */
+    private Thread mPoolThread;
+    private Handler mPoolThreadHander;
 
-	/**
-	 * 引入一个值为1的信号量，防止mPoolThreadHander未初始化完成
-	 */
-	private volatile Semaphore mSemaphore = new Semaphore(0);
+    /**
+     * 运行在UI线程的handler，用于给ImageView设置图片
+     */
+    private Handler mUIHandler;
 
-	/**
-	 * 引入一个值为1的信号量，由于线程池内部也有一个阻塞线程，防止加入任务的速度过快，使LIFO效果不明显
-	 */
-	private volatile Semaphore mPoolSemaphore;
+    /**
+     * 引入一个值为1的信号量，防止mPoolThreadHander未初始化完成
+     */
+    private Semaphore mSemaphorePoolThreadHander = new Semaphore(0);
 
-	private static ImageLoader mInstance;
-
-	/**
-	 * 队列的调度方式
-	 * 
-	 * @author zhy
-	 * 
-	 */
-	public enum Type
-	{
-		FIFO, LIFO
-	}
+    /**
+     * 引入一个值为1的信号量，由于线程池内部也有一个阻塞线程，防止加入任务的速度过快，使LIFO效果不明显
+     */
+    private volatile Semaphore mSemaphoreThreadPool;
 
 
-	/**
-	 * 单例获得该实例对象
-	 * 
-	 * @return
-	 */
-	public static ImageLoader getInstance()
-	{
+    /**
+     * 队列的调度方式
+     *
+     * @author zhy
+     */
+    public enum Type {
+        FIFO, LIFO
+    }
 
-		if (mInstance == null)
-		{
-			synchronized (ImageLoader.class)
-			{
-				if (mInstance == null)
-				{
-					mInstance = new ImageLoader(1, Type.LIFO);
-				}
-			}
-		}
-		return mInstance;
-	}
+    private ImageLoader(int ThreadCount, Type type) {
+        init(ThreadCount, type);
+    }
 
-	private ImageLoader(int threadCount, Type type)
-	{
-		init(threadCount, type);
-	}
+    /**
+     * 初始化
+     */
+    private void init(int threadCount, Type type) {
+        //后台轮询线程
+        mPoolThread = new Thread() {
+            @Override
+            public void run() {
+                Looper.prepare();
+                mPoolThreadHander = new Handler() {
+                    @Override
+                    public void handleMessage(Message msg) {
+                        //通过线程池取出任务进行执行
+                        mThreadPool.execute(getTasks());
+                        try {
+                            //当任务量==threadCount时，阻塞
+                            mSemaphoreThreadPool.acquire();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
 
-	private void init(int threadCount, Type type)
-	{
-		// loop thread
-		mPoolThread = new Thread()
-		{
-			@Override
-			public void run()
-			{
-				Looper.prepare();
+                    }
+                };
+                //释放一个信号量
+                mSemaphorePoolThreadHander.release();
+                Looper.loop();
+            }
+        };
+        mPoolThread.start();
+        //获取应用的最大可用内存
+        int maxMemory = (int) Runtime.getRuntime().maxMemory();
+        int cacheMemory = maxMemory / 8;
+        mLruCache = new LruCache<String, Bitmap>(cacheMemory) {
+            @Override
+            protected int sizeOf(String key, Bitmap value) {
+                return value.getRowBytes() * value.getHeight();
+            }
+        };
+        //初始化线程池
+        mThreadPool = Executors.newFixedThreadPool(threadCount);
+        mTasksQueue = new LinkedList<>();
+        mType = type;
+        mSemaphoreThreadPool = new Semaphore(threadCount);
+    }
+    public static ImageLoader getImageLoader() {
+        if (mInstance == null) {
+            //同步
+            synchronized (ImageLoader.class) {
+                if (mInstance == null) {
+                    mInstance = new ImageLoader(DEAFULT_THREAD_COUNT, Type.FIFO);
+                }
+            }
+        }
+        return mInstance;
+    }
+    public static ImageLoader getImageLoader(int threadCount,Type type) {
+        if (mInstance == null) {
+            //同步
+            synchronized (ImageLoader.class) {
+                if (mInstance == null) {
+                    mInstance = new ImageLoader(threadCount,type);
+                }
+            }
+        }
+        return mInstance;
+    }
 
-				mPoolThreadHander = new Handler()
-				{
-					@Override
-					public void handleMessage(Message msg)
-					{
-						mThreadPool.execute(getTask());
-						try
-						{
-							mPoolSemaphore.acquire();
-						} catch (InterruptedException e)
-						{
-						}
-					}
-				};
-				// 释放一个信号量
-				mSemaphore.release();
-				Looper.loop();
-			}
-		};
-		mPoolThread.start();
+    /**
+     * 根据path为imageview设置图片
+     */
+    public void loadImage(final String path, final ImageView imageView) {
+        imageView.setTag(path);
+        if (mUIHandler == null) {
+            mUIHandler = new Handler() {
+                @Override
+                public void handleMessage(Message msg) {
+                    //获取得到图片，为imagview回调设置图片
+                    ImgBeanHolder holder = (ImgBeanHolder) msg.obj;
+                    ImageView imageView = holder.imageView;
+                    Bitmap bm = holder.bitmap;
+                    String path = holder.path;
+                    //将path与getTag存储的路径进行比较
+                    if (imageView.getTag().toString().equals(path)) {
+                        imageView.setImageBitmap(bm);
+                    }
+                }
+            };
+        }
+        Bitmap bitmap = getBitmapFromLruCache(path);
+        if (bitmap != null) {
+            refreashBitmap(path, imageView, bitmap);
+        } else {
+            addTask(new Runnable() {
+                @Override
+                public void run() {
+                    //加载图片
+                    //图片的压缩
+                    //1.首先获取图片需要显示的大小
+                    ImageSize imageSize = getImageViewSize(imageView);
+                    //2.压缩图片
+                    Bitmap bitmap = decodeSampledBitmapFromResource(path, imageSize.width, imageSize.height);
+                    //3.加入缓存
+                    addBitmapToLruCache(path, bitmap);
+                    //回调
+                    refreashBitmap(path, imageView, bitmap);
+                    //执行完一个任务释放一个任务
+                    mSemaphoreThreadPool.release();
+                }
+            });
+        }
+    }
 
-		// 获取应用程序最大可用内存
-		int maxMemory = (int) Runtime.getRuntime().maxMemory();
-		int cacheSize = maxMemory / 8;
-		mLruCache = new LruCache<String, Bitmap>(cacheSize)
-		{
-			@Override
-			protected int sizeOf(String key, Bitmap value)
-			{
-				return value.getRowBytes() * value.getHeight();
-			};
-		};
+    protected void refreashBitmap(String path, ImageView imageView, Bitmap bitmap) {
+        ImgBeanHolder imgBeanHolder = new ImgBeanHolder();
+        imgBeanHolder.bitmap = bitmap;
+        imgBeanHolder.imageView = imageView;
+        imgBeanHolder.path = path;
+        Message message = Message.obtain();
+        message.obj = imgBeanHolder;
+        mUIHandler.sendMessage(message);
+    }
 
-		mThreadPool = Executors.newFixedThreadPool(threadCount);
-		mPoolSemaphore = new Semaphore(threadCount);
-		mTasks = new LinkedList<Runnable>();
-		mType = type == null ? Type.LIFO : type;
+    /**
+     * 将图片加入缓存
+     **/
+    protected void addBitmapToLruCache(String path, Bitmap bitmap) {
+        if (getBitmapFromLruCache(path) == null) {
+            if (bitmap != null) {
+                mLruCache.put(path, bitmap);
+            }
+        }
+    }
 
-	}
+    /**
+     * 根据图片需要显示的宽和高对图片进行压缩
+     */
+    private Bitmap decodeSampledBitmapFromResource(String path, int width, int height) {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;//获取图片的宽和高但并不把图片加载到内存中
+        BitmapFactory.decodeFile(path, options);
+        options.inSampleSize = calculateInSampleSize(options, width, height);
+        //使用获取到的inSampleSize解析图片
+        options.inJustDecodeBounds = false;//加载图片到内存
+        Bitmap bitmap = BitmapFactory.decodeFile(path, options);
+        return bitmap;
+    }
 
-	/**
-	 * 加载图片
-	 * 
-	 * @param path
-	 * @param imageView
-	 */
-	public void loadImage(final String path, final ImageView imageView)
-	{
-		// set tag
-		imageView.setTag(path);
-		// UI线程
-		if (mHandler == null)
-		{
-			mHandler = new Handler()
-			{
-				@Override
-				public void handleMessage(Message msg)
-				{
-					ImgBeanHolder holder = (ImgBeanHolder) msg.obj;
-					ImageView imageView = holder.imageView;
-					Bitmap bm = holder.bitmap;
-					String path = holder.path;
-					if (imageView.getTag().toString().equals(path))
-					{
-						imageView.setImageBitmap(bm);
-					}
-				}
-			};
-		}
+    /**
+     * 根据需求图片的宽和高和实际图片的宽和高计算SampleSize
+     */
+    private int calculateInSampleSize(BitmapFactory.Options options, int reWidth, int reHeight) {
+        // 源图片的宽度
+        int width = options.outWidth;
+        int height = options.outHeight;
+        int inSampleSize = 1;
+        if (width > reWidth || height > reHeight) {
+            // 计算出实际宽度和目标宽度的比率
+            int widthRadio = Math.round(width * 1.0f / reWidth);
+            int heightRadio = Math.round(height * 1.0f / reHeight);
+            inSampleSize = Math.max(widthRadio, heightRadio);//最大的压缩
+        }
+        return inSampleSize;
+    }
 
-		Bitmap bm = getBitmapFromLruCache(path);
-		if (bm != null)
-		{
-			ImgBeanHolder holder = new ImgBeanHolder();
-			holder.bitmap = bm;
-			holder.imageView = imageView;
-			holder.path = path;
-			Message message = Message.obtain();
-			message.obj = holder;
-			mHandler.sendMessage(message);
-		} else
-		{
-			addTask(new Runnable()
-			{
-				@Override
-				public void run()
-				{
+    /***
+     * 根据imagview获取适当的压缩的宽和高
+     */
+    protected ImageSize getImageViewSize(ImageView imageView) {
+        ImageSize imageSize = new ImageSize();
+        DisplayMetrics displayMetrics = imageView.getContext().getResources().getDisplayMetrics();
+        ViewGroup.LayoutParams params = imageView.getLayoutParams();
+        int width = imageView.getWidth();//获取imageview的实际宽度
+        if (width <= 0) {
+            width = params.width;//获取imageview在layout中声明的宽度
+        }
 
-					ImageSize imageSize = getImageViewWidth(imageView);
-
-					int reqWidth = imageSize.width;
-					int reqHeight = imageSize.height;
-
-					Bitmap bm = decodeSampledBitmapFromResource(path, reqWidth,
-							reqHeight);
-					addBitmapToLruCache(path, bm);
-					ImgBeanHolder holder = new ImgBeanHolder();
-					holder.bitmap = getBitmapFromLruCache(path);
-					holder.imageView = imageView;
-					holder.path = path;
-					Message message = Message.obtain();
-					message.obj = holder;
-					// Log.e("TAG", "mHandler.sendMessage(message);");
-					mHandler.sendMessage(message);
-					mPoolSemaphore.release();
-				}
-			});
-		}
-
-	}
-	
-	/**
-	 * 添加一个任务
-	 * 
-	 * @param runnable
-	 */
-	private synchronized void addTask(Runnable runnable)
-	{
-		try
-		{
-			// 请求信号量，防止mPoolThreadHander为null
-			if (mPoolThreadHander == null)
-				mSemaphore.acquire();
-		} catch (InterruptedException e)
-		{
-		}
-		mTasks.add(runnable);
-		
-		mPoolThreadHander.sendEmptyMessage(0x110);
-	}
-
-	/**
-	 * 取出一个任务
-	 * 
-	 * @return
-	 */
-	private synchronized Runnable getTask()
-	{
-		if (mType == Type.FIFO)
-		{
-			return mTasks.removeFirst();
-		} else if (mType == Type.LIFO)
-		{
-			return mTasks.removeLast();
-		}
-		return null;
-	}
-	
-	/**
-	 * 单例获得该实例对象
-	 * 
-	 * @return
-	 */
-	public static ImageLoader getInstance(int threadCount, Type type)
-	{
-
-		if (mInstance == null)
-		{
-			synchronized (ImageLoader.class)
-			{
-				if (mInstance == null)
-				{
-					mInstance = new ImageLoader(threadCount, type);
-				}
-			}
-		}
-		return mInstance;
-	}
+        if (width <= 0) {
+            width = getImageFieldValue(imageView,"mMaxWidth");//检查最大值
+        }
+        if (width <= 0) {
+            width = displayMetrics.widthPixels;
+        }
 
 
-	/**
-	 * 根据ImageView获得适当的压缩的宽和高
-	 * 
-	 * @param imageView
-	 * @return
-	 */
-	private ImageSize getImageViewWidth(ImageView imageView)
-	{
-		ImageSize imageSize = new ImageSize();
-		final DisplayMetrics displayMetrics = imageView.getContext()
-				.getResources().getDisplayMetrics();
-		final LayoutParams params = imageView.getLayoutParams();
+        int height = imageView.getHeight();//获取imageview的实际宽度
+        if (height <= 0) {
+            height = params.height;//获取imageview在layout中声明的宽度
+        }
 
-		int width = params.width == LayoutParams.WRAP_CONTENT ? 0 : imageView
-				.getWidth(); // Get actual image width
-		if (width <= 0)
-			width = params.width; // Get layout width parameter
-		if (width <= 0)
-			width = getImageViewFieldValue(imageView, "mMaxWidth"); // Check
-																	// maxWidth
-																	// parameter
-		if (width <= 0)
-			width = displayMetrics.widthPixels;
-		int height = params.height == LayoutParams.WRAP_CONTENT ? 0 : imageView
-				.getHeight(); // Get actual image height
-		if (height <= 0)
-			height = params.height; // Get layout height parameter
-		if (height <= 0)
-			height = getImageViewFieldValue(imageView, "mMaxHeight"); // Check
-																		// maxHeight
-																		// parameter
-		if (height <= 0)
-			height = displayMetrics.heightPixels;
-		imageSize.width = width;
-		imageSize.height = height;
-		return imageSize;
+        if (height <= 0) {
+            height = getImageFieldValue(imageView, "mMaxHeight");//检查最大值
+        }
+        if (width <= 0) {
+            height = displayMetrics.heightPixels;
+        }
 
-	}
+        imageSize.width = width;
+        imageSize.height = height;
+        return imageSize;
 
-	/**
-	 * 从LruCache中获取一张图片，如果不存在就返回null。
-	 */
-	private Bitmap getBitmapFromLruCache(String key)
-	{
-		return mLruCache.get(key);
-	}
+    }
 
-	/**
-	 * 往LruCache中添加一张图片
-	 * 
-	 * @param key
-	 * @param bitmap
-	 */
-	private void addBitmapToLruCache(String key, Bitmap bitmap)
-	{
-		if (getBitmapFromLruCache(key) == null)
-		{
-			if (bitmap != null)
-				mLruCache.put(key, bitmap);
-		}
-	}
+    /**
+     * 通过反射获取imageview的某个属性值
+     */
+    private static int getImageFieldValue(Object obj, String fieldName) {
+        int value = 0;
+        try {
+            Field field = ImageView.class.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            int fieldValue=field.getInt(obj);
+            if(fieldValue> 0 && fieldValue < Integer.MAX_VALUE){
+                value=fieldValue;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return value;
+    }
 
-	/**
-	 * 计算inSampleSize，用于压缩图片
-	 * 
-	 * @param options
-	 * @param reqWidth
-	 * @param reqHeight
-	 * @return
-	 */
-	private int calculateInSampleSize(BitmapFactory.Options options,
-			int reqWidth, int reqHeight)
-	{
-		// 源图片的宽度
-		int width = options.outWidth;
-		int height = options.outHeight;
-		int inSampleSize = 1;
+    private synchronized void addTask(Runnable runnable) {
+        mTasksQueue.add(runnable);
+        try {
+            //请求
+            if (mPoolThreadHander == null) {
+                mSemaphorePoolThreadHander.acquire();
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        mPoolThreadHander.sendEmptyMessage(0x110);
+    }
 
-		if (width > reqWidth && height > reqHeight)
-		{
-			// 计算出实际宽度和目标宽度的比率
-			int widthRatio = Math.round((float) width / (float) reqWidth);
-			int heightRatio = Math.round((float) width / (float) reqWidth);
-			inSampleSize = Math.max(widthRatio, heightRatio);
-		}
-		return inSampleSize;
-	}
+    private Runnable getTasks() {
+        if (mType == Type.FIFO) {
 
-	/**
-	 * 根据计算的inSampleSize，得到压缩后图片
-	 * 
-	 * @param pathName
-	 * @param reqWidth
-	 * @param reqHeight
-	 * @return
-	 */
-	private Bitmap decodeSampledBitmapFromResource(String pathName,
-			int reqWidth, int reqHeight)
-	{
-		// 第一次解析将inJustDecodeBounds设置为true，来获取图片大小
-		final BitmapFactory.Options options = new BitmapFactory.Options();
-		options.inJustDecodeBounds = true;
-		BitmapFactory.decodeFile(pathName, options);
-		// 调用上面定义的方法计算inSampleSize值
-		options.inSampleSize = calculateInSampleSize(options, reqWidth,
-				reqHeight);
-		// 使用获取到的inSampleSize值再次解析图片
-		options.inJustDecodeBounds = false;
-		Bitmap bitmap = BitmapFactory.decodeFile(pathName, options);
+            return mTasksQueue.removeFirst();
+        } else if (mType == Type.LIFO) {
 
-		return bitmap;
-	}
+            return mTasksQueue.removeLast();
+        }
+        return null;
+    }
 
-	private class ImgBeanHolder
-	{
-		Bitmap bitmap;
-		ImageView imageView;
-		String path;
-	}
+    //根据path在缓存中获取bitmap
+    private Bitmap getBitmapFromLruCache(String key) {
+        return mLruCache.get(key);
+    }
 
-	private class ImageSize
-	{
-		int width;
-		int height;
-	}
+    private class ImageSize {
+        int width;
+        int height;
+    }
 
-	/**
-	 * 反射获得ImageView设置的最大宽度和高度
-	 * 
-	 * @param object
-	 * @param fieldName
-	 * @return
-	 */
-	private static int getImageViewFieldValue(Object object, String fieldName)
-	{
-		int value = 0;
-		try
-		{
-			Field field = ImageView.class.getDeclaredField(fieldName);
-			field.setAccessible(true);
-			int fieldValue = (Integer) field.get(object);
-			if (fieldValue > 0 && fieldValue < Integer.MAX_VALUE)
-			{
-				value = fieldValue;
-
-				Log.e("TAG", value + "");
-			}
-		} catch (Exception e)
-		{
-		}
-		return value;
-	}
-
+    private class ImgBeanHolder {
+        String path;
+        Bitmap bitmap;
+        ImageView imageView;
+    }
 }

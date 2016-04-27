@@ -11,7 +11,6 @@ import android.widget.ImageView;
 import android.widget.Toast;
 
 import chanlytech.mycamera.R;
-import chanlytech.mycamera.activity.GalleryActivity;
 import chanlytech.mycamera.utils.PictureUtil;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
@@ -39,7 +38,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 startActivity(mIntent);
                 break;
             case R.id.btn_2:
-                mIntent = new Intent(this, GalleryActivity.class);
+                mIntent = new Intent(this, LibraryActivity.class);
 //                startActivity(mIntent);
                 startActivityForResult(mIntent, 900);
                 break;
